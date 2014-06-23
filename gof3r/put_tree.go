@@ -17,19 +17,23 @@ type putTreeResult struct {
 	succeeded bool
 }
 
+var puttree PutTree
+
 type PutTree struct {
 	count          uint64
 	result_counter uint64
 	results        chan string
-	Path string `short:"p" long:"path" description:"Path to directory."`
-	Prefix string `long:"prefix" description:"Prefix for s3."`
+	bucket         s3gof3r.Bucket
+	conf           *s3gof3r.Config
+	Path           string `short:"p" long:"path" description:"Path to directory."`
+	Prefix         string `long:"prefix" description:"Prefix for s3."`
 	CommonOpts
 	Header http.Header `long:"header" short:"m" description:"HTTP headers"`
 }
 
-func NewPutTree() *PutTree {
-	return &PutTree{results: make(chan string)}
-}
+// func NewPutTree() *PutTree {
+// 	return &PutTree{results: make(chan string)}
+// }
 
 func (puttree *PutTree) AddFile() {
 	atomic.AddUint64(&puttree.count, 1)
@@ -54,7 +58,6 @@ func (puttree *PutTree) PutToS3(path string, info os.FileInfo, err error) error 
 		return nil
 	}
 
-
 	if !info.IsDir() {
 		puttree.AddFile()
 		go puttree.putToS3(path)
@@ -64,41 +67,26 @@ func (puttree *PutTree) PutToS3(path string, info os.FileInfo, err error) error 
 }
 
 func (puttree *PutTree) putToS3(path string) {
-	conf := new(s3gof3r.Config)
-	*conf = *s3gof3r.DefaultConfig
-
-	k, err := getAWSKeys()
-	if err != nil {
-		return
-	}
-	s3 := s3gof3r.New(puttree.EndPoint, k)
-	bucket := s3.Bucket(puttree.Bucket)
-
-	key := url.QueryEscape(filepath.Join(puttree.Prefix, path))
-	fmt.Println(key)
-
-	s3gof3r.SetLogger(os.Stderr, "", log.LstdFlags, put.Debug)
-
-	if put.Header == nil {
-		puttree.Header = make(http.Header)
-	}
-
 	r, err := os.Open(path)
 	if err != nil || path == "" {
 		return
 	}
 
+	key := url.QueryEscape(filepath.Join(puttree.Prefix, path))
+	fmt.Printf("%s -> %s\n", path, key)
+
 	defer r.Close()
 
-	w, err := bucket.PutWriter(key, puttree.Header, conf)
+	bucket := puttree.bucket
+	w, err := bucket.PutWriter(key, puttree.Header, puttree.conf)
 	if err != nil {
 		puttree.results <- ""
-		return 
+		return
 	}
 
 	if _, err = io.Copy(w, r); err != nil {
 		puttree.results <- ""
-		return 
+		return
 	}
 
 	if err = w.Close(); err != nil {
@@ -127,17 +115,29 @@ Loop:
 	}
 }
 
-
-
-var puttree PutTree
-
 func (puttree *PutTree) Execute(args []string) (err error) {
 	conf := new(s3gof3r.Config)
 	*conf = *s3gof3r.DefaultConfig
+	puttree.conf = conf
+
+	k, err := getAWSKeys()
+	if err != nil {
+		return
+	}
+
+	s3 := s3gof3r.New(puttree.EndPoint, k)
+	puttree.bucket = *s3.Bucket(puttree.Bucket)
+
+	s3gof3r.SetLogger(os.Stderr, "", log.LstdFlags, put.Debug)
+
+	if puttree.Header == nil {
+		puttree.Header = make(http.Header)
+	}
 
 	if puttree.Concurrency > 0 {
 		conf.Concurrency = puttree.Concurrency
 	}
+
 	if puttree.WithoutSSL {
 		conf.Scheme = "http"
 	}
@@ -145,12 +145,11 @@ func (puttree *PutTree) Execute(args []string) (err error) {
 	conf.PartSize = puttree.PartSize
 	conf.Md5Check = !puttree.CheckDisable
 
-        // use os.library? to get list of files inside path
-	// add these to our struct
-	// enumerate over this slice and throw putting command
-	// into go routines
+	puttree.results = make(chan string)
+
 	fmt.Println(puttree.Path)
 	filepath.Walk(puttree.Path, puttree.PutToS3)
+
 	puttree.WaitForIt()
 	return
 }
